@@ -1,14 +1,13 @@
 // Terrier Motorsport - Cooling Loop Code
 // Michael Waetzman, mwae@bu.edu
-// October 2024
-
-// ! TEST PLANNED FOR SATURDAY 10/12 (maybe that Sunday)
+// November 2024
 
 // Attributions
 // SD and FreeRTOS Library Example Code
+// hedaselish's "M3200 Pressure Transducer Arduino"
+  // https://www.instructables.com/M3200-Pressure-Transducer-Arduino/
 
-// To-Do
-// 1. Fan Control
+// NOTE: NTC pullup R = 1kΩ, PT/I2C pullup R=4.7kΩ
 
 #include <SPI.h>
 #include <SD.h>
@@ -21,14 +20,25 @@ SemaphoreHandle_t xSerialSemaphore;
 // Pin Definitions
 // SPI: 10-13 are reserved for SPI (used by the SD card)
 const int chipSelect = 10;
+
 // Analog: for the NTC temperature sensor
 const int NTC_PIN = 14;  // A0
 
+// I2C: Address for M3200 Pressure Transducer
+const int PT_ADDR = 0x28;
+
 const String filename = "cooling_test_data.csv";
 
+// Basically creating a "new variable type" that can store two values
+struct PT_Data{
+  uint16_t pt_pressure;
+  uint16_t pt_temperature;
+};
+byte status;
+float maxPressure = 100;    //! VERIFY THIS
 
 // ==============================================
-// ||                 SET-UP                   ||
+// ||              SET-UP & LOOP               ||
 // ==============================================
 
 void setup() {
@@ -43,23 +53,25 @@ void setup() {
 
   // Init I2C Wire
   Wire.begin();
-
 }
 
 void loop() {
-  float ntc_temp, pt_temp, pt_pressure;
+  float ntc_temp, pt_temp, pt_pres;
 
   // Read Data
   ntc_temp = read_NTC_temp();
-  pt_temp = read_PT_temp();
-  pt_pressure = read_PT_pressure();
+
+  PT_Data pt_data = read_PT();
+  pt_temp = pt_data.pt_temperature;
+  pt_pres = pt_data.pt_pressure;
 
   // Show Data on Serial Plot/Monitor
-  String serial_str = "NTC TEMP: " + String(ntc_temp) + "°C\n" + "PT TEMP: " + String(pt_temp) + "°C\n" + "PT PRESSURE: " + String(pt_pressure) + "units...\n\n";
+  String serial_str = "NTC TEMP: " + String(ntc_temp) + "°C\n" + "PT TEMP: " + String(pt_temp) + "°C\n" + "PT PRESSURE: " + String(pt_pres) + "units...\n\n";
   Serial.print(serial_str);
 
-  // Log Data
-  String data_csv_form = String(ntc_temp) + "," + String(pt_temp) + "," + String(pt_pressure);
+  // Log Data w/ time stamp (milis)
+  int long current_time = millis();
+  String data_csv_form = String(current_time) + "," + String(ntc_temp) + "," + String(pt_temp) + "," + String(pt_pres);
 
   if (SD.exists(filename)) {
     File sd = SD.open(filename, FILE_WRITE);
@@ -71,6 +83,8 @@ void loop() {
     sd.println(data_csv_form);
   }
 
+  // Half second delay so we're not collecting more data than the SD card can store 
+  delay(500);
 }
 
 // ==============================================
@@ -94,23 +108,46 @@ void SD_init() {
   Serial.println("initialization done.");
 }
 
-float read_PT_pressure() {
-  // Uses I2C to send 14bit temperature value (in PSI/bar--idk...)
-    //! ADDRESS FOR OUR PT???
-  float pt_pressure;
+PT_Data read_PT() {
+  // Read from I2C  temperature and pressure values (in C? and PSI)
 
-  return pt_pressure;
+  // Storing data in a struct (could use pointers, but this is easier for non CompE/CS to understand)
+  PT_Data current_data = {0,0}; // pressure, temperature
+
+  Wire.requestFrom(PT_ADDR, 4);   // See fig 1.6.1, shows read commands
+
+  int n = Wire.available();
+  if(n == 4){
+    status = 0;
+    uint16_t rawP;     // pressure data from sensor
+    uint16_t rawT;     // temperature data from sensor
+    rawP = (uint16_t) Wire.read();    // upper 8 bits
+    rawP <<= 8;
+    rawP |= (uint16_t) Wire.read();    // lower 8 bits
+    rawT = (uint16_t)  Wire.read();    // upper 8 bits
+    rawT <<= 8;
+    rawT |= (uint16_t) Wire.read();   // lower 8 bits
+
+    status = rawP >> 14;   // The status is 0, 1, 2 or 3
+    rawP &= 0x3FFF;   // keep 14 bits, remove status bits
+
+    rawT >>= 5;     // the lowest 5 bits are not used
+    float pressure = ((rawP - 1000.0) / (15000.0 - 1000.0)) * maxPressure;
+    float temperature = ((rawT - 512.0) / (1075.0 - 512.0)) * 55.0;
+    
+    current_data.pt_pressure = pressure;
+    current_data.pt_temperature = temperature;
+
+  } else {
+    Serial.println("Pressure Transducer not detected.");
+  }
+
+  return current_data;
 }
 
-float read_PT_temp() {
-  // Uses I2C to send 11bit temperature value (in °C)
-  float pt_temp;
-
-  return pt_temp;
-}
 
 float read_NTC_temp() {
-  // Finds resistance from sensor, assuming an "R2" value of 1k Ohm
+  // Finds resistance from sensor, assuming a pullup R = 1kΩ
   // Assuming linear ΔR between increments of 10°C
   float ntc_temp;
   int ntc_temp_map;
